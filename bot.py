@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 import pytz
 import os
 import json
@@ -17,15 +17,20 @@ DATA_FILE = "attendance.json"
 # ================== LOAD / SAVE ==================
 def load():
     if not os.path.exists(DATA_FILE):
-        return {}
+        return {
+            "attendance": {},
+            "history_channel": {}
+        }
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def save(data):
+def save():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-attendance = load()
+data = load()
+attendance = data["attendance"]
+history_channel = data["history_channel"]
 
 # ================== TIME ==================
 def now():
@@ -33,6 +38,9 @@ def now():
 
 def today():
     return now().strftime("%Y-%m-%d")
+
+def yesterday():
+    return (now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
 def in_session():
     t = now().time()
@@ -76,7 +84,6 @@ class AttendanceView(discord.ui.View):
         attendance.setdefault(gid, {}).setdefault(day, {}).setdefault("noon", [])
         attendance.setdefault(gid, {}).setdefault(day, {}).setdefault("evening", [])
 
-        # Chặn trùng trong cùng buổi
         if any(u["uid"] == uid for u in attendance[gid][day][session]):
             await interaction.response.send_message(
                 "⚠️ Bạn đã điểm danh buổi này rồi", ephemeral=True
@@ -87,17 +94,16 @@ class AttendanceView(discord.ui.View):
             "uid": uid,
             "time": now().strftime("%H:%M")
         })
-        save(attendance)
+        save()
 
         await interaction.response.send_message("✅ Điểm danh thành công", ephemeral=True)
         await interaction.message.edit(
-            embed=build_embed(gid),
+            embed=build_embed(gid, day),
             view=AttendanceView(gid)
         )
 
 # ================== EMBED ==================
-def build_embed(gid):
-    day = today()
+def build_embed(gid, day):
     noon = attendance.get(gid, {}).get(day, {}).get("noon", [])
     evening = attendance.get(gid, {}).get(day, {}).get("evening", [])
 
@@ -107,100 +113,74 @@ def build_embed(gid):
         color=discord.Color.blurple()
     )
 
-    # TRƯA
-    if noon:
-        embed.add_field(
-            name="🌤️ BUỔI TRƯA (12:00 – 16:00)",
-            value="\n".join(
-                f"**{i}.** <@{u['uid']}> — `{u['time']}`"
-                for i, u in enumerate(noon, 1)
-            ),
-            inline=False
-        )
-    else:
-        embed.add_field(
-            name="🌤️ BUỔI TRƯA (12:00 – 16:00)",
-            value="📭 Chưa có ai điểm danh",
-            inline=False
-        )
+    embed.add_field(
+        name="🌤️ BUỔI TRƯA (12:00 – 16:00)",
+        value="\n".join(
+            f"**{i}.** <@{u['uid']}> — `{u['time']}`"
+            for i, u in enumerate(noon, 1)
+        ) if noon else "📭 Chưa có ai điểm danh",
+        inline=False
+    )
 
-    # TỐI
-    if evening:
-        embed.add_field(
-            name="🌙 BUỔI TỐI (18:00 – 22:00)",
-            value="\n".join(
-                f"**{i}.** <@{u['uid']}> — `{u['time']}`"
-                for i, u in enumerate(evening, 1)
-            ),
-            inline=False
-        )
-    else:
-        embed.add_field(
-            name="🌙 BUỔI TỐI (18:00 – 22:00)",
-            value="📭 Chưa có ai điểm danh",
-            inline=False
-        )
+    embed.add_field(
+        name="🌙 BUỔI TỐI (18:00 – 22:00)",
+        value="\n".join(
+            f"**{i}.** <@{u['uid']}> — `{u['time']}`"
+            for i, u in enumerate(evening, 1)
+        ) if evening else "📭 Chưa có ai điểm danh",
+        inline=False
+    )
 
-    total = len(noon) + len(evening)
-    embed.set_footer(text=f"👥 Tổng hôm nay: {total} | Mỗi buổi 1 lần / người")
+    embed.set_footer(
+        text=f"👥 Tổng hôm nay: {len(noon) + len(evening)} | Mỗi buổi 1 lần / người"
+    )
 
     return embed
 
 # ================== COMMAND ==================
 @tree.command(name="diemdanh", description="Tạo bảng điểm danh")
 @admin_only()
-async def diemdanh(interaction: discord.Interaction):
+async def diemdanh(interaction: discord.Interaction, channel: discord.TextChannel):
     gid = str(interaction.guild.id)
-    await interaction.response.send_message(
-        embed=build_embed(gid),
+    day = today()
+
+    await channel.send(
+        embed=build_embed(gid, day),
         view=AttendanceView(gid)
     )
-
-@tree.command(name="testdiemdanh", description="Test điểm danh trưa / tối")
-@admin_only()
-@app_commands.choices(buoi=[
-    app_commands.Choice(name="Trưa", value="noon"),
-    app_commands.Choice(name="Tối", value="evening"),
-])
-async def testdiemdanh(interaction: discord.Interaction, buoi: app_commands.Choice[str]):
-    gid = str(interaction.guild.id)
     await interaction.response.send_message(
-        embed=build_embed(gid),
-        view=AttendanceView(gid),
+        f"✅ Đã gửi bảng điểm danh vào {channel.mention}",
         ephemeral=True
     )
 
-@tree.command(name="testlichsu", description="Xem lịch sử hôm nay")
+@tree.command(name="kenhlichsu", description="Set kênh gửi lịch sử tự động mỗi ngày")
 @admin_only()
-async def testlichsu(interaction: discord.Interaction, channel: discord.TextChannel):
-    gid = str(interaction.guild.id)
-    embed = build_embed(gid)
-    await channel.send(embed=embed)
-    await interaction.response.send_message("✅ Đã gửi lịch sử", ephemeral=True)
-
-@tree.command(name="testenday", description="Kết thúc ngày + gửi lịch sử")
-@admin_only()
-async def testenday(interaction: discord.Interaction, channel: discord.TextChannel):
-    gid = str(interaction.guild.id)
-    embed = build_embed(gid)
-    await channel.send(embed=embed)
-
-    attendance.get(gid, {}).pop(today(), None)
-    save(attendance)
-
+async def kenhlichsu(interaction: discord.Interaction, channel: discord.TextChannel):
+    history_channel[str(interaction.guild.id)] = str(channel.id)
+    save()
     await interaction.response.send_message(
-        "🔚 Đã kết thúc ngày & reset dữ liệu",
+        f"✅ Đã set kênh lịch sử: {channel.mention}",
         ephemeral=True
     )
 
-# ================== RESET AUTO ==================
+# ================== AUTO RESET + SEND HISTORY ==================
 @tasks.loop(minutes=1)
 async def auto_reset():
-    if now().strftime("%H:%M") == "00:00":
-        for gid in attendance:
-            attendance[gid].pop(today(), None)
-        save(attendance)
-        print("🔄 Reset ngày mới")
+    if now().strftime("%H:%M") != "00:00":
+        return
+
+    yday = yesterday()
+
+    for gid in list(attendance.keys()):
+        if gid in history_channel:
+            ch = bot.get_channel(int(history_channel[gid]))
+            if ch:
+                await ch.send(embed=build_embed(gid, yday))
+
+        attendance[gid].pop(yday, None)
+
+    save()
+    print("🔄 Reset ngày mới + gửi lịch sử")
 
 # ================== READY ==================
 @bot.event
