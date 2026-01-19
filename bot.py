@@ -176,8 +176,8 @@ async def testevery(interaction: discord.Interaction, buoi: app_commands.Choice[
         await interaction.response.send_message("❌ Chưa set kênh điểm danh", ephemeral=True)
         return
 
-    text = "@everyone 🌤️ **[TEST] MỞ ĐIỂM DANH TRƯA**" if buoi.value == "noon" \
-        else "@everyone 🌙 **[TEST] MỞ ĐIỂM DANH TỐI**"
+    text = "@everyone 🌤️ **MỞ ĐIỂM DANH TRƯA**" if buoi.value == "noon" \
+        else "@everyone 🌙 **MỞ ĐIỂM DANH TỐI**"
 
     msg = await channel.send(text)
     await interaction.response.send_message("✅ Đã test", ephemeral=True)
@@ -284,3 +284,4 @@ async def on_ready():
     print(f"✅ Bot online: {bot.user}")
 
 bot.run(TOKEN)
+
