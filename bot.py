@@ -1,27 +1,28 @@
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from datetime import datetime, timedelta, time as dtime
-import pytz, os, json, asyncio
+from datetime import datetime, time as dtime, timedelta
+import pytz
+import os
+import json
 
-# ================= ENV =================
+# ================== ENV ==================
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("❌ Thiếu TOKEN")
 
-TZ = pytz.timezone("Asia/Ho_Chi_Minh")
+tz = pytz.timezone("Asia/Ho_Chi_Minh")
 DATA_FILE = "attendance.json"
 
-# ================= DATA =================
+# ================== LOAD / SAVE ==================
 def load():
     if not os.path.exists(DATA_FILE):
         return {
-            "attendance_live": {},
-            "attendance_log": {},
-            "attendance_channel": {},
+            "attendance": {},
             "history_channel": {},
-            "weekly_channel": {},
-            "role_theodoi": {}
+            "attendance_channel": {},
+            "weekly_summary_channel": {},
+            "weekly_summary_role": {}
         }
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -31,166 +32,245 @@ def save():
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 data = load()
+attendance = data["attendance"]
+history_channel = data["history_channel"]
+attendance_channel = data["attendance_channel"]
+weekly_summary_channel = data["weekly_summary_channel"]
+weekly_summary_role = data["weekly_summary_role"]
 
-# ================= TIME =================
+# ================== TIME ==================
 def now():
-    return datetime.now(TZ)
+    return datetime.now(tz)
 
 def today():
     return now().strftime("%Y-%m-%d")
 
-def monday():
-    d = now().date()
-    return (d - timedelta(days=d.weekday())).strftime("%Y-%m-%d")
+def in_session():
+    t = now().time()
+    if dtime(12, 0) <= t <= dtime(16, 0):
+        return "noon"
+    if dtime(18, 0) <= t <= dtime(22, 0):
+        return "evening"
+    return None
 
-# ================= BOT =================
+def week_dates():
+    today_dt = now().date()
+    start = today_dt - timedelta(days=(today_dt.weekday() + 1) % 7)
+    return [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+
+# ================== INIT DAY ==================
+def init_today(gid):
+    day = today()
+    attendance.setdefault(gid, {})
+    attendance[gid][day] = {
+        "noon": [],
+        "evening": []
+    }
+    save()
+
+# ================== BOT ==================
 intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-# ================= PERMISSION =================
+# ================== PERMISSION ==================
 def admin_only():
     async def predicate(interaction: discord.Interaction):
         return interaction.user.guild_permissions.administrator
     return app_commands.check(predicate)
 
-# ================= VIEW =================
-class AttendView(discord.ui.View):
+# ================== VIEW ==================
+class AttendanceView(discord.ui.View):
     def __init__(self, gid):
         super().__init__(timeout=None)
-        self.gid = str(gid)
+        self.gid = gid
 
-    @discord.ui.button(label="🍱 Điểm danh Trưa", style=discord.ButtonStyle.success)
-    async def noon(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await attend(interaction, "noon")
-
-    @discord.ui.button(label="🌙 Điểm danh Tối", style=discord.ButtonStyle.primary)
-    async def evening(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await attend(interaction, "evening")
-
-# ================= ATTEND =================
-async def attend(interaction, session):
-    gid = str(interaction.guild.id)
-    uid = str(interaction.user.id)
-
-    role_id = data["role_theodoi"].get(gid)
-    if role_id:
-        role = interaction.guild.get_role(role_id)
-        if role and role not in interaction.user.roles:
-            return await interaction.response.send_message(
-                "❌ Bạn không thuộc role theo dõi", ephemeral=True
-            )
-
-    data["attendance_live"].setdefault(gid, {"noon": [], "evening": []})
-    data["attendance_log"].setdefault(gid, {}).setdefault(today(), {"noon": [], "evening": []})
-
-    if uid in data["attendance_live"][gid][session]:
-        return await interaction.response.send_message(
-            "⚠️ Bạn đã điểm danh rồi", ephemeral=True
-        )
-
-    data["attendance_live"][gid][session].append(uid)
-    data["attendance_log"][gid][today()][session].append(uid)
-    save()
-
-    await update_board(interaction.guild)
-    await interaction.response.send_message("✅ Điểm danh thành công", ephemeral=True)
-
-# ================= EMBED =================
-async def update_board(guild):
-    gid = str(guild.id)
-    cid = data["attendance_channel"].get(gid)
-    if not cid:
-        return
-
-    channel = guild.get_channel(int(cid))
-    if not channel:
-        return
-
-    noon = data["attendance_live"].get(gid, {}).get("noon", [])
-    evening = data["attendance_live"].get(gid, {}).get("evening", [])
-
-    embed = discord.Embed(
-        title="📋 BẢNG ĐIỂM DANH",
-        description=f"📅 {today()}",
-        color=0x2ecc71
-    )
-
-    embed.add_field(name="🍱 Trưa", value="\n".join(f"<@{u}>" for u in noon) or "—", inline=False)
-    embed.add_field(name="🌙 Tối", value="\n".join(f"<@{u}>" for u in evening) or "—", inline=False)
-
-    async for msg in channel.history(limit=5):
-        if msg.author == bot.user:
-            await msg.edit(embed=embed, view=AttendView(gid))
+    @discord.ui.button(label="📍 Điểm danh", style=discord.ButtonStyle.success)
+    async def attend(self, interaction: discord.Interaction, button: discord.ui.Button):
+        session = in_session()
+        if not session:
+            await interaction.response.send_message("⛔ Ngoài giờ điểm danh", ephemeral=True)
             return
 
-    await channel.send(embed=embed, view=AttendView(gid))
+        gid = str(interaction.guild.id)
+        uid = str(interaction.user.id)
+        day = today()
 
-# ================= AUTO =================
-@tasks.loop(seconds=30)
-async def auto_notify():
-    hm = now().strftime("%H:%M")
-    for gid, cid in data["attendance_channel"].items():
-        channel = bot.get_channel(int(cid))
+        attendance.setdefault(gid, {}).setdefault(day, {"noon": [], "evening": []})
+
+        if any(u["uid"] == uid for u in attendance[gid][day][session]):
+            await interaction.response.send_message("⚠️ Bạn đã điểm danh buổi này rồi", ephemeral=True)
+            return
+
+        attendance[gid][day][session].append({
+            "uid": uid,
+            "time": now().strftime("%H:%M")
+        })
+        save()
+
+        await interaction.response.send_message("✅ Điểm danh thành công", ephemeral=True)
+        await interaction.message.edit(
+            embed=build_embed(gid, day),
+            view=AttendanceView(gid)
+        )
+
+# ================== EMBED NGÀY ==================
+def build_embed(gid, day):
+    noon = attendance.get(gid, {}).get(day, {}).get("noon", [])
+    evening = attendance.get(gid, {}).get(day, {}).get("evening", [])
+
+    embed = discord.Embed(
+        title="📌 ĐIỂM DANH",
+        description=f"📅 Ngày: **{day}**",
+        color=discord.Color.blurple()
+    )
+
+    embed.add_field(
+        name="🌤️ BUỔI TRƯA",
+        value="\n".join(
+            f"{i}. <@{u['uid']}> — `{u['time']}`"
+            for i, u in enumerate(noon, 1)
+        ) if noon else "Chưa có",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🌙 BUỔI TỐI",
+        value="\n".join(
+            f"{i}. <@{u['uid']}> — `{u['time']}`"
+            for i, u in enumerate(evening, 1)
+        ) if evening else "Chưa có",
+        inline=False
+    )
+
+    return embed
+
+# ================== EMBED TUẦN ==================
+def build_week_attendance_tables(gid, role: discord.Role):
+    dates = week_dates()
+    user_count = {}
+
+    for day in dates:
+        day_data = attendance.get(gid, {}).get(day, {})
+        for session in ["noon", "evening"]:
+            for u in day_data.get(session, []):
+                user_count[u["uid"]] = user_count.get(u["uid"], 0) + 1
+
+    role_members = {str(m.id): m for m in role.members}
+
+    full_list = []
+    under_5_list = []
+
+    for uid, total in user_count.items():
+        if uid not in role_members:
+            continue
+        member = role_members[uid]
+        full_list.append((member, total))
+        if total < 5:
+            under_5_list.append((member, total))
+
+    full_list.sort(key=lambda x: x[1], reverse=True)
+    under_5_list.sort(key=lambda x: x[1])
+
+    embed = discord.Embed(
+        title="📊 BẢNG TỔNG ĐIỂM DANH TUẦN",
+        description=f"📅 {dates[0]} → {dates[-1]}\n👀 Role: {role.mention}",
+        color=discord.Color.orange()
+    )
+
+    embed.add_field(
+        name="🟦 Tổng điểm danh",
+        value="\n".join(
+            f"• {m.mention} — **{t} buổi**"
+            for m, t in full_list
+        ) if full_list else "Không có dữ liệu",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🟥 Dưới 5 buổi",
+        value="\n".join(
+            f"• {m.mention} — **{t} buổi** ⚠️"
+            for m, t in under_5_list
+        ) if under_5_list else "Không có",
+        inline=False
+    )
+
+    return embed
+
+# ================== COMMAND ==================
+@tree.command(name="diemdanh")
+@admin_only()
+async def diemdanh(interaction: discord.Interaction, channel: discord.TextChannel):
+    gid = str(interaction.guild.id)
+    attendance_channel[gid] = str(channel.id)
+    init_today(gid)
+    save()
+
+    await channel.send(
+        embed=build_embed(gid, today()),
+        view=AttendanceView(gid)
+    )
+    await interaction.response.send_message("✅ Đã gửi bảng điểm danh", ephemeral=True)
+
+@tree.command(name="tongtuan")
+@admin_only()
+async def tongtuan(interaction: discord.Interaction, channel: discord.TextChannel, roletheodoi: discord.Role):
+    embed = build_week_attendance_tables(str(interaction.guild.id), roletheodoi)
+    await channel.send(embed=embed)
+    await interaction.response.send_message("✅ Đã gửi tổng tuần", ephemeral=True)
+
+@tree.command(name="settongtuan")
+@admin_only()
+async def settongtuan(interaction: discord.Interaction, channel: discord.TextChannel, roletheodoi: discord.Role):
+    gid = str(interaction.guild.id)
+    weekly_summary_channel[gid] = str(channel.id)
+    weekly_summary_role[gid] = str(roletheodoi.id)
+    save()
+    await interaction.response.send_message("✅ Auto tổng tuần lúc 23:59 Thứ 7", ephemeral=True)
+
+# ================== AUTO WEEK ==================
+@tasks.loop(minutes=1)
+async def auto_weekly_summary():
+    n = now()
+    if n.weekday() != 5 or n.strftime("%H:%M") != "23:59":
+        return
+
+    for gid, ch_id in weekly_summary_channel.items():
+        channel = bot.get_channel(int(ch_id))
+        if not channel:
+            continue
+        role = channel.guild.get_role(int(weekly_summary_role.get(gid)))
+        if not role:
+            continue
+
+        await channel.send(embed=build_week_attendance_tables(gid, role))
+
+# ================== DAILY RESET ==================
+@tasks.loop(minutes=1)
+async def daily_reset():
+    if now().strftime("%H:%M") != "00:00":
+        return
+
+    for gid, ch_id in attendance_channel.items():
+        channel = bot.get_channel(int(ch_id))
         if not channel:
             continue
 
-        if hm == "12:00":
-            m = await channel.send("@everyone 🍱 **MỞ ĐIỂM DANH TRƯA**")
-            await m.delete(delay=60)
+        init_today(gid)
 
-        if hm == "18:00":
-            m = await channel.send("@everyone 🌙 **MỞ ĐIỂM DANH TỐI**")
-            await m.delete(delay=60)
+        await channel.send(
+            embed=build_embed(gid, today()),
+            view=AttendanceView(gid)
+        )
 
-@tasks.loop(minutes=1)
-async def reset_day():
-    if now().strftime("%H:%M") != "00:00":
-        return
-    for gid in data["attendance_live"]:
-        data["attendance_live"][gid] = {"noon": [], "evening": []}
-    save()
-
-# ================= SLASH =================
-@tree.command(name="diemdanh", description="Gửi bảng điểm danh")
-@admin_only()
-async def diemdanh(interaction: discord.Interaction, channel: discord.TextChannel):
-    data["attendance_channel"][str(interaction.guild.id)] = channel.id
-    save()
-    await update_board(interaction.guild)
-    await interaction.response.send_message("✅ Đã tạo bảng điểm danh", ephemeral=True)
-
-@tree.command(name="setrole", description="Set role theo dõi")
-@admin_only()
-async def setrole(interaction: discord.Interaction, role: discord.Role):
-    data["role_theodoi"][str(interaction.guild.id)] = role.id
-    save()
-    await interaction.response.send_message("✅ Đã set role", ephemeral=True)
-
-@tree.command(name="testthongbao", description="Test thông báo điểm danh")
-@admin_only()
-async def testthongbao(interaction: discord.Interaction):
-    await interaction.response.send_message("🧪 OK", ephemeral=True)
-
-@tree.command(name="testreset", description="Test reset ngày")
-@admin_only()
-async def testreset(interaction: discord.Interaction):
-    for gid in data["attendance_live"]:
-        data["attendance_live"][gid] = {"noon": [], "evening": []}
-    save()
-    await interaction.response.send_message("🧹 Reset OK", ephemeral=True)
-
-@tree.command(name="testevery", description="Test slash command")
-async def testevery(interaction: discord.Interaction):
-    await interaction.response.send_message("✅ Slash hoạt động", ephemeral=True)
-
-# ================= READY =================
+# ================== READY ==================
 @bot.event
 async def on_ready():
     await tree.sync()
-    auto_notify.start()
-    reset_day.start()
-    print("✅ Bot online – slash đầy đủ")
+    auto_weekly_summary.start()
+    daily_reset.start()
+    print(f"✅ Bot online: {bot.user}")
 
 bot.run(TOKEN)
