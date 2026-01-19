@@ -21,7 +21,9 @@ def load():
         return {
             "attendance": {},
             "history_channel": {},
-            "attendance_channel": {}
+            "attendance_channel": {},
+            "watch_role": {},
+            "seo_role": {}
         }
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -34,6 +36,8 @@ data = load()
 attendance = data["attendance"]
 history_channel = data["history_channel"]
 attendance_channel = data["attendance_channel"]
+watch_role = data["watch_role"]
+seo_role = data["seo_role"]
 
 # ================== TIME ==================
 def now():
@@ -44,6 +48,10 @@ def today():
 
 def yesterday():
     return (now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+def week_days():
+    start = now() - timedelta(days=now().weekday())
+    return [(start + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
 
 def in_session():
     t = now().time()
@@ -72,12 +80,10 @@ class AttendanceView(discord.ui.View):
         self.gid = gid
 
     @discord.ui.button(label="📍 Điểm danh", style=discord.ButtonStyle.success)
-    async def attend(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def attend(self, interaction: discord.Interaction, _):
         session = in_session()
         if not session:
-            await interaction.response.send_message(
-                "⛔ Ngoài giờ điểm danh", ephemeral=True
-            )
+            await interaction.response.send_message("⛔ Ngoài giờ điểm danh", ephemeral=True)
             return
 
         gid = str(interaction.guild.id)
@@ -88,9 +94,7 @@ class AttendanceView(discord.ui.View):
         attendance.setdefault(gid, {}).setdefault(day, {}).setdefault("evening", [])
 
         if any(u["uid"] == uid for u in attendance[gid][day][session]):
-            await interaction.response.send_message(
-                "⚠️ Bạn đã điểm danh buổi này rồi", ephemeral=True
-            )
+            await interaction.response.send_message("⚠️ Bạn đã điểm danh buổi này rồi", ephemeral=True)
             return
 
         attendance[gid][day][session].append({
@@ -100,10 +104,7 @@ class AttendanceView(discord.ui.View):
         save()
 
         await interaction.response.send_message("✅ Điểm danh thành công", ephemeral=True)
-        await interaction.message.edit(
-            embed=build_embed(gid, day),
-            view=AttendanceView(gid)
-        )
+        await interaction.message.edit(embed=build_embed(gid, day), view=AttendanceView(gid))
 
 # ================== EMBED ==================
 def build_embed(gid, day):
@@ -117,142 +118,137 @@ def build_embed(gid, day):
     )
 
     embed.add_field(
-        name="🌤️ BUỔI TRƯA (12:00 – 16:00)",
-        value="\n".join(
-            f"**{i}.** <@{u['uid']}> — `{u['time']}`"
-            for i, u in enumerate(noon, 1)
-        ) if noon else "📭 Chưa có ai điểm danh",
+        name="🌤️ BUỔI TRƯA",
+        value="\n".join(f"{i}. <@{u['uid']}> — `{u['time']}`" for i, u in enumerate(noon, 1))
+        if noon else "📭 Chưa có ai",
         inline=False
     )
 
     embed.add_field(
-        name="🌙 BUỔI TỐI (18:00 – 22:00)",
-        value="\n".join(
-            f"**{i}.** <@{u['uid']}> — `{u['time']}`"
-            for i, u in enumerate(evening, 1)
-        ) if evening else "📭 Chưa có ai điểm danh",
+        name="🌙 BUỔI TỐI",
+        value="\n".join(f"{i}. <@{u['uid']}> — `{u['time']}`" for i, u in enumerate(evening, 1))
+        if evening else "📭 Chưa có ai",
         inline=False
     )
 
-    embed.set_footer(
-        text=f"👥 Tổng hôm nay: {len(noon) + len(evening)} | Mỗi buổi 1 lần / người"
-    )
+    embed.set_footer(text=f"Tổng hôm nay: {len(noon) + len(evening)}")
     return embed
 
 # ================== COMMAND ==================
-@tree.command(name="diemdanh", description="Tạo bảng điểm danh")
+@tree.command(name="diemdanh")
 @admin_only()
 async def diemdanh(interaction: discord.Interaction, channel: discord.TextChannel):
     gid = str(interaction.guild.id)
-    day = today()
-
     attendance_channel[gid] = str(channel.id)
     save()
+    await channel.send(embed=build_embed(gid, today()), view=AttendanceView(gid))
+    await interaction.response.send_message("✅ Đã tạo bảng điểm danh", ephemeral=True)
 
-    await channel.send(
-        embed=build_embed(gid, day),
-        view=AttendanceView(gid)
-    )
-    await interaction.response.send_message(
-        f"✅ Đã gửi bảng điểm danh vào {channel.mention}",
-        ephemeral=True
-    )
-
-@tree.command(name="kenhlichsu", description="Set kênh gửi lịch sử")
+@tree.command(name="kenhlichsu")
 @admin_only()
 async def kenhlichsu(interaction: discord.Interaction, channel: discord.TextChannel):
     history_channel[str(interaction.guild.id)] = str(channel.id)
     save()
-    await interaction.response.send_message(
-        f"✅ Đã set kênh lịch sử: {channel.mention}",
-        ephemeral=True
-    )
+    await interaction.response.send_message("✅ Đã set kênh lịch sử", ephemeral=True)
 
-@tree.command(name="testthongbao", description="Test thông báo mở điểm danh")
+@tree.command(name="roledd")
 @admin_only()
-@app_commands.choices(buoi=[
-    app_commands.Choice(name="Trưa", value="noon"),
-    app_commands.Choice(name="Tối", value="evening"),
-])
-async def testthongbao(interaction: discord.Interaction, buoi: app_commands.Choice[str]):
-    gid = str(interaction.guild.id)
-    if gid not in attendance_channel:
-        await interaction.response.send_message(
-            "❌ Chưa set kênh điểm danh",
-            ephemeral=True
+async def roledd(interaction: discord.Interaction, role: discord.Role):
+    watch_role[str(interaction.guild.id)] = str(role.id)
+    save()
+    await interaction.response.send_message("✅ Đã set role theo dõi", ephemeral=True)
+
+@tree.command(name="roleseo")
+@admin_only()
+async def roleseo(interaction: discord.Interaction, rolechinh: discord.Role, rolephu: discord.Role):
+    seo_role[str(interaction.guild.id)] = {
+        "main": str(rolechinh.id),
+        "sub": str(rolephu.id)
+    }
+    save()
+    await interaction.response.send_message("✅ Đã set role sẹo", ephemeral=True)
+
+# ================== HANDLE WEEK ==================
+async def handle_week(guild: discord.Guild, channel: discord.TextChannel):
+    gid = str(guild.id)
+    if gid not in watch_role or gid not in seo_role:
+        return
+
+    role_watch = guild.get_role(int(watch_role[gid]))
+    role_main = guild.get_role(int(seo_role[gid]["main"]))
+    role_sub = guild.get_role(int(seo_role[gid]["sub"]))
+
+    violators = []
+
+    for member in role_watch.members:
+        count = 0
+        for d in week_days():
+            for s in ["noon", "evening"]:
+                if any(
+                    u["uid"] == str(member.id)
+                    for u in attendance.get(gid, {}).get(d, {}).get(s, [])
+                ):
+                    count += 1
+
+        if count < 5:
+            violators.append((member, count))
+            if role_main in member.roles:
+                await member.add_roles(role_sub)
+            else:
+                await member.add_roles(role_main)
+
+    if violators:
+        await channel.send(
+            "\n".join(f"{m.mention} ({c}/5)" for m, c in violators)
+            + "\n\n⚠️ Nhắc nhở bạn không đủ 5 buổi điểm danh 1 tuần\n"
+              "Vui lòng vào <#1462742560274382952> đóng tiền để được xóa sẹo"
         )
-        return
 
-    channel = bot.get_channel(int(attendance_channel[gid]))
-    text = "@everyone ⏰ **[TEST] MỞ ĐIỂM DANH BUỔI TRƯA**" if buoi.value == "noon" \
-        else "@everyone 🌙 **[TEST] MỞ ĐIỂM DANH BUỔI TỐI**"
-
-    msg = await channel.send(text)
-    await interaction.response.send_message("✅ Đã gửi test", ephemeral=True)
-    await asyncio.sleep(60)
-    await msg.delete()
-
-@tree.command(name="testreset", description="Test reset ngày (admin)")
+@tree.command(name="xuly")
 @admin_only()
-async def testreset(interaction: discord.Interaction):
-    gid = str(interaction.guild.id)
-    day = today()
+async def xuly(interaction: discord.Interaction, channel: discord.TextChannel):
+    await handle_week(interaction.guild, channel)
+    await interaction.response.send_message("✅ Đã xử lý tuần", ephemeral=True)
 
-    if gid in history_channel:
-        ch = bot.get_channel(int(history_channel[gid]))
-        if ch:
-            await ch.send(embed=build_embed(gid, day))
+@tree.command(name="testxuly")
+@admin_only()
+async def testxuly(interaction: discord.Interaction, member: discord.Member, channel: discord.TextChannel):
+    await handle_week(interaction.guild, channel)
+    await interaction.response.send_message("🧪 Đã test xử lý", ephemeral=True)
 
-    attendance.get(gid, {}).pop(day, None)
-    save()
-
-    await interaction.response.send_message(
-        "🔄 **[TEST] Đã reset ngày + gửi lịch sử**",
-        ephemeral=True
-    )
-
-# ================== AUTO NOTIFY ==================
-@tasks.loop(seconds=30)
-async def notify_session():
-    now_time = now().strftime("%H:%M")
-    for gid, cid in attendance_channel.items():
-        channel = bot.get_channel(int(cid))
-        if not channel:
-            continue
-
-        if now_time == "12:00":
-            msg = await channel.send("@everyone ⏰ **MỞ ĐIỂM DANH BUỔI TRƯA**")
-            await asyncio.sleep(60)
-            await msg.delete()
-
-        if now_time == "18:00":
-            msg = await channel.send("@everyone 🌙 **MỞ ĐIỂM DANH BUỔI TỐI**")
-            await asyncio.sleep(60)
-            await msg.delete()
-
-# ================== AUTO RESET ==================
+# ================== AUTO XỬ LÝ THỨ 7 ==================
 @tasks.loop(minutes=1)
-async def auto_reset():
-    if now().strftime("%H:%M") != "00:00":
+async def auto_xuly_week():
+    t = now()
+    if t.weekday() != 5 or t.strftime("%H:%M") != "23:59":
         return
 
-    yday = yesterday()
-    for gid in list(attendance.keys()):
-        if gid in history_channel:
-            ch = bot.get_channel(int(history_channel[gid]))
-            if ch:
-                await ch.send(embed=build_embed(gid, yday))
-        attendance[gid].pop(yday, None)
+    for gid, cid in history_channel.items():
+        guild = bot.get_guild(int(gid))
+        channel = bot.get_channel(int(cid))
+        if guild and channel:
+            await handle_week(guild, channel)
+
+# ================== AUTO RESET TUẦN ==================
+@tasks.loop(minutes=1)
+async def auto_reset_week():
+    t = now()
+    if t.weekday() != 6 or t.strftime("%H:%M") != "00:00":
+        return
+
+    for gid in attendance:
+        for d in week_days():
+            attendance[gid].pop(d, None)
 
     save()
-    print("🔄 Reset ngày mới")
+    print("🧹 Reset tuần hoàn tất")
 
 # ================== READY ==================
 @bot.event
 async def on_ready():
     await tree.sync()
-    notify_session.start()
-    auto_reset.start()
+    auto_xuly_week.start()
+    auto_reset_week.start()
     print(f"✅ Bot online: {bot.user}")
 
 bot.run(TOKEN)
